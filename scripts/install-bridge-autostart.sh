@@ -66,8 +66,9 @@ status_macos() {
     return 1
   fi
   echo "LaunchAgent: $PLIST"
-  # `launchctl list <label>` prints the pid and last exit status when loaded.
-  if launchctl list "$LABEL" 2>/dev/null; then
+  # Query the user's GUI domain explicitly. `launchctl list <label>` can report
+  # a false negative for a LaunchAgent that is visible in gui/<uid>.
+  if launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null; then
     :
   else
     echo "  (not currently loaded)"
@@ -197,8 +198,21 @@ case "$OS" in
 </dict>
 </plist>
 PLIST_EOF
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load "$PLIST"
+    DOMAIN="gui/$(id -u)"
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    # bootout is asynchronous: an immediate bootstrap can fail with EIO while
+    # launchd is still removing the old job. Wait for the actual state change.
+    for _ in {1..50}; do
+      if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+    if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      echo "LaunchAgent did not finish unloading: $LABEL" >&2
+      exit 1
+    fi
+    launchctl bootstrap "$DOMAIN" "$PLIST"
     echo "Installed LaunchAgent: $PLIST"
     echo "  Runs: $BRIDGE_BIN"
     echo "  Log:  $LOG_PATH"
